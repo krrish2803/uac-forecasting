@@ -1,0 +1,13 @@
+target,model,full_MAE,reported_only_MAE,reported_n
+in_hhs,Naive Persistence,6.36,6.43,10
+in_hhs,Moving Average (7d),42.21,41.03,10
+in_hhs,SARIMA,17.86,18.07,10
+in_hhs,Exp. Smoothing,108.95,102.95,10
+in_hhs,Random Forest,6.07,6.35,10
+in_hhs,Gradient Boosting,9.82,9.34,10
+discharged,Naive Persistence,2.0,2.53,10
+discharged,Moving Average (7d),2.89,2.84,10
+discharged,SARIMA,3.77,3.98,10
+discharged,Exp. Smoothing,4.68,5.12,10
+discharged,Random Forest,2.09,2.19,10
+discharged,Gradient Boosting,1.88,1.88,10
