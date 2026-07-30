@@ -69,7 +69,7 @@ def pressure_color(value):
         return "red"
 
 
-def generate_forecast(model, train_data, feature_cols, horizon, target):
+def generate_forecast(model, train_data, feature_cols, horizon, target, ci_alpha=0.05):
     if model is None:
         return None, None, None
     from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
@@ -87,7 +87,8 @@ def generate_forecast(model, train_data, feature_cols, horizon, target):
                     new_row[col] = preds[-1]
             current = pd.concat([current, new_row])
         preds = np.array(preds)
-        return preds, preds - 1.96 * np.std(preds), preds + 1.96 * np.std(preds)
+        ci_mult = 1.96 if ci_alpha == 0.05 else 1.28
+        return preds, preds - ci_mult * np.std(preds), preds + ci_mult * np.std(preds)
     elif hasattr(model, "predict"):
         try:
             forecast, conf_int = model.predict(n_periods=horizon, return_conf_int=True, alpha=0.05)
@@ -104,9 +105,28 @@ def main():
 
     df = load_features()
     comparison = load_comparison()
+
+    if len(date_range) == 2:
+        start_date, end_date = date_range
+        df_view = df[(df.index.date >= start_date) & (df.index.date <= end_date)]
+    else:
+        df_view = df
+
     latest = df.iloc[-1]
     prev = df.iloc[-2]
     net_pressure = compute_net_pressure(df).iloc[-1]
+
+    try:
+        src_all = pd.read_csv("data/interpolation_source.csv", index_col="date", parse_dates=True)
+        total_all = len(src_all)
+        reported_all = int(src_all["source"].value_counts().get("reported", 0))
+        interp_all = int(src_all["source"].value_counts().get("interpolated", 0))
+        interp_pct_all = interp_all / total_all * 100
+    except Exception:
+        total_all = len(df)
+        reported_all = total_all
+        interp_all = 0
+        interp_pct_all = 0
 
     col1, col2, col3, col4 = st.columns(4)
     with col1:
@@ -132,6 +152,12 @@ def main():
         ci_alpha = 0.20 if ci_width == "80%" else 0.05
 
         st.divider()
+        st.subheader("Date Range")
+        min_date = df.index.min().date()
+        max_date = df.index.max().date()
+        date_range = st.date_input("View Range", [min_date, max_date], min_value=min_date, max_value=max_date)
+
+        st.divider()
         st.subheader("Scenario Builder")
         intake_bump = st.slider("Intake Volume Adjustment (%)", -50, 100, 0)
         hist_peak = int(df["in_hhs"].max())
@@ -153,7 +179,8 @@ def main():
             st.caption("Model last trained: **unknown**")
         st.caption("Recommended retraining: **weekly** (given daily data volume and trend drift)")
 
-    tabs = st.tabs(["Care Load Forecast", "Discharge Demand", "Model Comparison", "Scenario Analysis"])
+    tabs = st.tabs(["Care Load Forecast", "Discharge Demand", "Model Comparison",
+                     "Scenario Analysis", "Trend Analysis", "Data Quality", "Error Analysis"])
 
     with tabs[0]:
         st.subheader("Future Care Load Forecast — Children in HHS Care")
@@ -241,20 +268,213 @@ def main():
         else:
             st.info("Adjust the intake volume slider in the sidebar to run a scenario.")
 
+    with tabs[4]:
+        st.subheader("Trend Analysis")
+        trend_target = st.selectbox("Target", TARGET_LABELS, format_func=lambda x: TARGET_LABELS[x],
+                                    key="trend_target")
+
+        col_t1, col_t2, col_t3 = st.columns(3)
+        weekly_avg = df_view[trend_target].resample("W").mean()
+        monthly_avg = df_view[trend_target].resample("ME").mean()
+
+        with col_t1:
+            st.metric("Monthly Avg", f"{monthly_avg.iloc[-1]:.0f}")
+        with col_t2:
+            change = ((monthly_avg.iloc[-1] - monthly_avg.iloc[-2]) / monthly_avg.iloc[-2] * 100) if len(monthly_avg) >= 2 else 0
+            st.metric("Month-over-Month", f"{change:+.1f}%")
+        with col_t3:
+            total_change = ((df[trend_target].iloc[-1] - df[trend_target].iloc[0]) / df[trend_target].iloc[0] * 100)
+            st.metric("Total Change (entire series)", f"{total_change:+.1f}%" if not np.isnan(total_change) else "N/A")
+
+        fig_t1 = go.Figure()
+        fig_t1.add_trace(go.Scatter(x=df_view.index, y=df_view[trend_target], name="Daily",
+                                    line=dict(color="gray", width=1), opacity=0.5))
+        fig_t1.add_trace(go.Scatter(x=weekly_avg.index, y=weekly_avg.values, name="Weekly Avg",
+                                    line=dict(color="blue", width=2)))
+        fig_t1.add_trace(go.Scatter(x=monthly_avg.index, y=monthly_avg.values, name="Monthly Avg",
+                                    line=dict(color="red", width=3)))
+        fig_t1.update_layout(height=400, title=f"{TARGET_LABELS[trend_target]} — Daily, Weekly, Monthly Trends",
+                             xaxis_title="Date", yaxis_title=TARGET_LABELS[trend_target])
+        st.plotly_chart(fig_t1, use_container_width=True)
+
+        st.subheader("Weekday / Weekend Comparison")
+        df_view_wk = df_view.copy()
+        df_view_wk["day_type"] = df_view_wk.index.to_series().apply(lambda x: "Weekend" if x.weekday() >= 5 else "Weekday")
+        wk_group = df_view_wk.groupby("day_type")[trend_target].agg(["mean", "std", "count"])
+        st.dataframe(wk_group.style.format("{:.1f}"), use_container_width=True)
+
+        if "discharged" in trend_target and "Weekend" in wk_group.index:
+            wkday_val = wk_group.loc["Weekday", "mean"] if "Weekday" in wk_group.index else 0
+            wkend_val = wk_group.loc["Weekend", "mean"] if "Weekend" in wk_group.index else 0
+            if wkday_val > 0:
+                pct_diff = (wkend_val - wkday_val) / wkday_val * 100
+                st.info(f"Weekend discharge rate is **{pct_diff:+.1f}%** vs weekdays — consistent with batch processing schedules.")
+
+        st.subheader("Net Pressure History")
+        net = compute_net_pressure(df_view)
+        fig_t2 = go.Figure()
+        colors = ["red" if v > 5 else "orange" if v > -2 else "green" for v in net]
+        fig_t2.add_trace(go.Bar(x=net.index, y=net.values, name="Net Pressure", marker_color=colors))
+        fig_t2.add_hline(y=0, line_dash="dot", line_color="black")
+        fig_t2.update_layout(height=350, title="Net Pressure (Transferred Out - Discharged)",
+                             xaxis_title="Date", yaxis_title="Pressure Signal")
+        st.plotly_chart(fig_t2, use_container_width=True)
+
+    with tabs[5]:
+        st.subheader("Data Quality Report")
+        try:
+            src = pd.read_csv("data/interpolation_source.csv", index_col="date", parse_dates=True)
+            src_view = src.loc[src.index.isin(df_view.index)]
+            total = len(src_view)
+            reported = int(src_view["source"].value_counts().get("reported", 0))
+            interpolated = int(src_view["source"].value_counts().get("interpolated", 0))
+            interp_pct = interpolated / total * 100 if total > 0 else 0
+        except Exception:
+            total = len(df_view)
+            reported = total
+            interpolated = 0
+            interp_pct = 0
+
+        cq1, cq2, cq3, cq4 = st.columns(4)
+        with cq1:
+            st.metric("Total Days", f"{total}")
+        with cq2:
+            st.metric("Reported Days", f"{reported}")
+        with cq3:
+            st.metric("Interpolated Days", f"{interpolated}")
+        with cq4:
+            st.metric("Interpolation Rate", f"{interp_pct:.1f}%")
+
+        fig_q = go.Figure()
+        if interpolated > 0:
+            colors = ["green" if s == "reported" else "orange" for s in src_view["source"]]
+            fig_q.add_trace(go.Bar(x=src_view.index, y=[1]*total, name="Data Source",
+                                   marker_color=colors, hovertext=src_view["source"]))
+            fig_q.update_layout(height=200, title="Data Source: Green = Reported, Orange = Interpolated",
+                                showlegend=False, yaxis={"visible": False})
+            st.plotly_chart(fig_q, use_container_width=True)
+
+        st.subheader("Data Completeness by Month")
+        df_view_m = df_view.copy()
+        df_view_m["month"] = df_view_m.index.to_period("M")
+        completeness = df_view_m.groupby("month").apply(
+            lambda g: g[trend_target].notna().sum() / len(g) * 100 if len(g) > 0 else 0
+        )
+        fig_c = go.Figure()
+        fig_c.add_trace(go.Bar(x=[str(m) for m in completeness.index], y=completeness.values,
+                               marker_color=["green" if v >= 90 else "orange" if v >= 50 else "red" for v in completeness.values]))
+        fig_c.add_hline(y=100, line_dash="dot", line_color="gray")
+        fig_c.update_layout(height=300, title="Monthly Completeness (%)",
+                            xaxis_title="Month", yaxis_title="Completeness %")
+        st.plotly_chart(fig_c, use_container_width=True)
+
+        st.subheader("Key Statistics")
+        stats = pd.DataFrame({
+            "Metric": ["Mean", "Median", "Std Dev", "Min", "Max", "Latest"],
+            "in_hhs": [df_view["in_hhs"].mean(), df_view["in_hhs"].median(),
+                       df_view["in_hhs"].std(), df_view["in_hhs"].min(),
+                       df_view["in_hhs"].max(), df_view["in_hhs"].iloc[-1]],
+            "discharged": [df_view["discharged"].mean(), df_view["discharged"].median(),
+                           df_view["discharged"].std(), df_view["discharged"].min(),
+                           df_view["discharged"].max(), df_view["discharged"].iloc[-1]],
+        })
+        st.dataframe(stats.style.format("{:.1f}"), use_container_width=True)
+
+    with tabs[6]:
+        st.subheader("Forecast Error Analysis")
+        error_target = st.selectbox("Target", TARGET_LABELS,
+                                    format_func=lambda x: TARGET_LABELS[x], key="error_target")
+        error_model = st.selectbox("Model", MODEL_NAMES, key="error_model")
+
+        fc = load_forecast(error_target, error_model)
+        if fc is not None:
+            fc_filt = fc[fc["date"].between(pd.Timestamp(start_date), pd.Timestamp(end_date))]
+            if len(fc_filt) > 0 and "actual" in fc_filt.columns:
+                fc_filt["error"] = fc_filt["predicted"] - fc_filt["actual"]
+                fc_filt["abs_error"] = fc_filt["error"].abs()
+                fc_filt["pct_error"] = (fc_filt["abs_error"] / fc_filt["actual"].replace(0, np.nan) * 100)
+
+                col_e1, col_e2, col_e3 = st.columns(3)
+                with col_e1:
+                    st.metric("Mean Absolute Error", f"{fc_filt['abs_error'].mean():.2f}")
+                with col_e2:
+                    st.metric("RMSE", f"{np.sqrt((fc_filt['error']**2).mean()):.2f}")
+                with col_e3:
+                    st.metric("Max Error", f"{fc_filt['abs_error'].max():.2f}")
+
+                fig_e1 = go.Figure()
+                fig_e1.add_trace(go.Bar(x=fc_filt["date"], y=fc_filt["error"],
+                                        marker_color=["red" if e > 0 else "green" for e in fc_filt["error"]]))
+                fig_e1.add_hline(y=0, line_dash="dot", line_color="black")
+                fig_e1.update_layout(height=300, title="Prediction Errors Over Time",
+                                     xaxis_title="Date", yaxis_title="Error (Predicted - Actual)")
+                st.plotly_chart(fig_e1, use_container_width=True)
+
+                fig_e2 = go.Figure()
+                fig_e2.add_trace(go.Histogram(x=fc_filt["error"], nbinsx=20, marker_color="steelblue"))
+                fig_e2.update_layout(height=300, title="Error Distribution",
+                                     xaxis_title="Error", yaxis_title="Count")
+                st.plotly_chart(fig_e2, use_container_width=True)
+
+                st.subheader("Error by Forecast Horizon")
+                fc_filt["horizon"] = fc_filt.groupby("date").cumcount() + 1
+                horizon_err = fc_filt.groupby("horizon")["abs_error"].mean()
+                fig_e3 = go.Figure()
+                fig_e3.add_trace(go.Scatter(x=horizon_err.index, y=horizon_err.values,
+                                            mode="lines+markers", line=dict(color="red", width=2)))
+                fig_e3.update_layout(height=300, title="Average Error by Forecast Horizon",
+                                     xaxis_title="Days Ahead", yaxis_title="Avg Absolute Error")
+                st.plotly_chart(fig_e3, use_container_width=True)
+            else:
+                st.info("Historical actuals not available in forecast file. Error metrics require actual values.")
+        else:
+            st.info(f"No forecast data available for {error_model} on {TARGET_LABELS[error_target]}.")
+
+        st.subheader("Residual Diagnostics")
+        try:
+            res_plot = f"outputs/plots/residuals_{error_target}.png"
+            if os.path.exists(res_plot):
+                st.image(res_plot, caption=f"Residual Plot — {TARGET_LABELS[error_target]}", use_container_width=False, width=800)
+            else:
+                st.info("Residual plot not found. Run evaluation to generate.")
+        except Exception:
+            st.info("Could not load residual plot.")
+
     st.divider()
     st.subheader("KPI Dashboard")
-    st.caption(f"Capacity threshold: **{capacity_threshold:,}** children (historical peak: {hist_peak:,})")
+    st.caption(f"Capacity threshold: **{capacity_threshold:,}** children (historical peak: {hist_peak:,}) | "
+               f"Data range: {start_date} to {end_date}")
 
     best_in_hhs = comparison[comparison["target"] == "in_hhs"].nsmallest(1, "MAE_overall")
     best_disc = comparison[comparison["target"] == "discharged"].nsmallest(1, "MAE_overall")
+    worst_in_hhs = comparison[comparison["target"] == "in_hhs"].nlargest(1, "MAE_overall")
+    worst_disc = comparison[comparison["target"] == "discharged"].nlargest(1, "MAE_overall")
 
     k1, k2, k3, k4 = st.columns(4)
     with k1:
         acc = 100 - (best_in_hhs["MAPE_overall"].values[0] if len(best_in_hhs) > 0 else 0)
-        st.metric("Forecast Accuracy (HHS Care)", f"{acc:.1f}%")
+        best_model_name = best_in_hhs["model"].values[0] if len(best_in_hhs) > 0 else ""
+        st.metric("Best in-hhs Model", best_model_name, f"MAE: {best_in_hhs['MAE_overall'].values[0]:.2f}" if len(best_in_hhs) > 0 else None)
     with k2:
-        st.metric("Surge Lead Time", "7 days")
+        best_model_name_d = best_disc["model"].values[0] if len(best_disc) > 0 else ""
+        st.metric("Best discharged Model", best_model_name_d, f"MAE: {best_disc['MAE_overall'].values[0]:.2f}" if len(best_disc) > 0 else None)
     with k3:
+        st.metric("Surge Lead Time", "7 days",
+                  delta=None)
+    with k4:
+        st.metric("Forecast Stability", "High")
+
+    k5, k6, k7, k8 = st.columns(4)
+    with k5:
+        data_coverage = (1 - interp_pct_all / 100) * 100
+        st.metric("Data Completeness", f"{data_coverage:.1f}%",
+                  delta=f"{interp_pct_all:.0f}% interpolated" if interp_pct_all > 0 else None)
+    with k6:
+        latest_weekend = df["discharged"].iloc[-7:].mean()
+        avg_weekday = df["discharged"].groupby(df.index.weekday < 5).mean().get(True, 0)
+        st.metric("Avg Weekly Discharge", f"{latest_weekend:.0f}/day",
+                  delta=f"{latest_weekend - avg_weekday:+.0f} vs overall")
+    with k7:
         if intake_bump != 0:
             fc_actual = load_forecast("in_hhs", "Random Forest")
             if fc_actual is not None:
@@ -265,8 +485,14 @@ def main():
                 st.metric("Capacity Breach Prob.", "N/A")
         else:
             st.metric("Capacity Breach Prob.", "0.0%")
-    with k4:
-        st.metric("Forecast Stability", "High")
+    with k8:
+        try:
+            monthly_trend = df["in_hhs"].resample("ME").mean()
+            mom_pct = ((monthly_trend.iloc[-1] - monthly_trend.iloc[-2]) / monthly_trend.iloc[-2] * 100)
+            st.metric("Monthly Trend (in-hhs)", f"{monthly_trend.iloc[-1]:.0f}",
+                      delta=f"{mom_pct:+.1f}%" if not np.isnan(mom_pct) else None)
+        except Exception:
+            st.metric("Monthly Trend (in-hhs)", "N/A")
 
 
 if __name__ == "__main__":
