@@ -182,7 +182,8 @@ def main():
         st.caption("Recommended retraining: **weekly** (given daily data volume and trend drift)")
 
     tabs = st.tabs(["Care Load Forecast", "Discharge Demand", "Model Comparison",
-                     "Scenario Analysis", "Trend Analysis", "Data Quality", "Error Analysis"])
+                     "Scenario Analysis", "Trend Analysis", "Data Quality", "Error Analysis",
+                     "Advanced Analytics"])
 
     with tabs[0]:
         st.subheader("Future Care Load Forecast — Children in HHS Care")
@@ -441,6 +442,86 @@ def main():
                 st.info("Residual plot not found. Run evaluation to generate.")
         except Exception:
             st.info("Could not load residual plot.")
+
+    with tabs[7]:
+        st.subheader("Advanced Analytics")
+        adv_target = st.selectbox("Target", TARGET_LABELS,
+                                  format_func=lambda x: TARGET_LABELS[x], key="adv_target")
+        adv_model = st.selectbox("Model", MODEL_NAMES, key="adv_model")
+
+        st.subheader("Feature Importance")
+        try:
+            model_obj = load_model(adv_target, adv_model)
+            if model_obj is not None and hasattr(model_obj, "feature_importances_"):
+                feature_cols = [c for c in df.columns
+                                if c not in ["apprehended", "in_cbp", "transferred_out", "in_hhs", "discharged"]]
+                importances = model_obj.feature_importances_
+                top_n = 15
+                indices = np.argsort(importances)[::-1][:top_n]
+                fi_df = pd.DataFrame({
+                    "Feature": [feature_cols[i] for i in indices],
+                    "Importance": importances[indices]
+                })
+                fig_fi = px.bar(fi_df, x="Importance", y="Feature", orientation="h",
+                                title=f"Top {top_n} Features — {adv_model} on {TARGET_LABELS[adv_target]}",
+                                color="Importance", color_continuous_scale="Blues")
+                fig_fi.update_layout(height=500, yaxis={"categoryorder": "total ascending"})
+                st.plotly_chart(fig_fi, use_container_width=True)
+            elif model_obj is not None:
+                st.info("This model type does not expose feature importances.")
+            else:
+                st.info("Model not loaded. Train the model first.")
+        except Exception as e:
+            st.info(f"Could not compute feature importance: {e}")
+
+        st.subheader("Actual vs Predicted")
+        adv_fc = load_forecast(adv_target, adv_model)
+        if adv_fc is not None and "actual" in adv_fc.columns:
+            valid = adv_fc.dropna(subset=["actual", "predicted"])
+            if len(valid) > 0:
+                err = (valid["predicted"] - valid["actual"]).abs().mean()
+                col_a1, col_a2, col_a3 = st.columns(3)
+                with col_a1:
+                    st.metric("MAE", f"{err:.2f}")
+                with col_a2:
+                    r2_val = 1 - ((valid["actual"] - valid["predicted"])**2).sum() / \
+                             ((valid["actual"] - valid["actual"].mean())**2).sum()
+                    st.metric("R²", f"{r2_val:.3f}")
+                with col_a3:
+                    st.metric("N (test days)", f"{len(valid)}")
+
+                fig_av = px.scatter(valid, x="actual", y="predicted",
+                                    title=f"Actual vs Predicted — {adv_model} on {TARGET_LABELS[adv_target]}",
+                                    labels={"actual": "Actual", "predicted": "Predicted"},
+                                    trendline="ols", trendline_color_override="red")
+                min_val = min(valid["actual"].min(), valid["predicted"].min())
+                max_val = max(valid["actual"].max(), valid["predicted"].max())
+                fig_av.add_trace(go.Scatter(x=[min_val, max_val], y=[min_val, max_val],
+                                            mode="lines", name="Perfect Prediction",
+                                            line=dict(dash="dot", color="gray")))
+                fig_av.update_layout(height=450)
+                st.plotly_chart(fig_av, use_container_width=True)
+            else:
+                st.info("No valid actual-vs-predicted pairs available.")
+        else:
+            st.info(f"No forecast data with actuals for {adv_model} on {TARGET_LABELS[adv_target]}.")
+
+        st.subheader("Correlation Heatmap")
+        try:
+            num_cols = df_view.select_dtypes(include=[np.number]).columns
+            corr_targets = [c for c in num_cols
+                            if c in ["in_hhs", "discharged", "apprehended", "in_cbp",
+                                     "transferred_out", "net_pressure"]
+                            or c.startswith(("in_hhs_lag1", "discharged_lag1", "apprehended_lag1"))]
+            corr_targets = [c for c in corr_targets if c in df_view.columns]
+            corr_matrix = df_view[corr_targets].corr()
+            fig_hm = px.imshow(corr_matrix, text_auto=".2f", aspect="auto",
+                               color_continuous_scale="RdBu_r", zmin=-1, zmax=1,
+                               title="Correlation Matrix — Key Features")
+            fig_hm.update_layout(height=600)
+            st.plotly_chart(fig_hm, use_container_width=True)
+        except Exception as e:
+            st.info(f"Could not generate heatmap: {e}")
 
     st.divider()
     st.subheader("KPI Dashboard")
