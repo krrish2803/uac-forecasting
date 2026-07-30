@@ -380,7 +380,7 @@ def main():
                            df_view["discharged"].std(), df_view["discharged"].min(),
                            df_view["discharged"].max(), df_view["discharged"].iloc[-1]],
         })
-        st.dataframe(stats.style.format("{:.1f}"), use_container_width=True)
+        st.dataframe(stats.round(1), use_container_width=True)
 
     with tabs[6]:
         st.subheader("Forecast Error Analysis")
