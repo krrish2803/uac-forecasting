@@ -53,14 +53,24 @@ uac_forecasting/
 
 ## Models
 
-| Model | Description | in_hhs MAE | discharged MAE |
-|-------|-------------|------------|----------------|
-| Naive Persistence | Yesterday = today | 6.36 | 2.00 |
-| Moving Average (7d) | 7-day rolling average | 42.21 | 2.89 |
-| SARIMA | Auto-selected, m=7 | 17.86 | 3.77 |
-| Exp. Smoothing | Holt-Winters | 108.95 | 4.68 |
-| **Random Forest** | 200 trees, lag features | **6.07** | 2.09 |
-| **Gradient Boosting** | 200 estimators | 9.82 | **1.88** |
+| Model | in_hhs MAE | in_hhs RMSE | in_hhs MAPE | discharged MAE | discharged RMSE | discharged MAPE |
+|-------|-----------|------------|------------|----------------|-----------------|----------------|
+| Naive Persistence | 6.36 | 7.19 | 0.26% | 2.00 | 3.01 | 28.0% |
+| Moving Average (7d) | 42.21 | 45.39 | 1.71% | 2.89 | 3.39 | 34.2% |
+| SARIMA | 17.86 | 19.72 | 0.72% | 3.77 | 4.45 | 46.2% |
+| Exp. Smoothing | 108.95 | 117.90 | 4.42% | 4.68 | 5.32 | 59.9% |
+| **Random Forest** | **6.07** | **7.72** | **0.25%** | 2.09 | 2.60 | 28.2% |
+| **Gradient Boosting** | 9.82 | 12.83 | 0.40% | **1.88** | **2.31** | **24.9%** |
+
+### Horizon Breakdown (Random Forest — in_hhs)
+
+| Horizon | MAE | RMSE | MAPE |
+|---------|-----|------|------|
+| 1-day | 14.61 | 14.61 | 0.60% |
+| 7-day | 7.55 | 9.32 | 0.31% |
+| 14-day | 6.07 | 7.72 | 0.25% |
+
+All metrics computed over a strict time-based 14-day holdout set (Dec 8–21, 2025).
 
 ## Setup
 
