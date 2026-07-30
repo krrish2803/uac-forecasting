@@ -106,6 +106,10 @@ def main():
     df = load_features()
     comparison = load_comparison()
 
+    min_date = df.index.min().date()
+    max_date = df.index.max().date()
+    date_range = [min_date, max_date]
+
     if len(date_range) == 2:
         start_date, end_date = date_range
         df_view = df[(df.index.date >= start_date) & (df.index.date <= end_date)]
@@ -153,9 +157,7 @@ def main():
 
         st.divider()
         st.subheader("Date Range")
-        min_date = df.index.min().date()
-        max_date = df.index.max().date()
-        date_range = st.date_input("View Range", [min_date, max_date], min_value=min_date, max_value=max_date)
+        date_range = st.date_input("View Range", date_range, min_value=min_date, max_value=max_date)
 
         st.divider()
         st.subheader("Scenario Builder")
